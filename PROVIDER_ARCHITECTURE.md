@@ -1,35 +1,55 @@
 # Multi-Provider Architecture Guide
 
-This document explains how the multi-provider system works with configurable polling intervals.
+This document explains how the multi-provider system works with configurable polling intervals for aggregating odds, markets, and settlement data from multiple sports data providers.
+
+## System Overview
+
+This API serves as the data layer for a sports betting platform, providing odds, markets, live updates, bet validation, and settlement data to an existing betting API that handles bet placement.
 
 ## Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    API Server                           │
-│  (Fastify + Bun)                                        │
-└──────────────┬──────────────────────────────────────────┘
-               │
-    ┌──────────┴──────────┐
-    │                     │
-┌───▼────┐         ┌──────▼──────┐
-│ Polling│         │  Aggregator │
-│ Manager│         │             │
-└───┬────┘         └──────┬──────┘
-    │                     │
-    │  ┌──────────────────┘
-    │  │
-┌───▼──▼──────────────────────────────┐
-│         Data Providers               │
-│  ┌────────────┐  ┌────────────┐    │
-│  │ Provider A │  │ Provider B │    │
-│  │ (Scores)   │  │ (Scores)   │    │
-│  └────────────┘  └────────────┘    │
-│  ┌────────────┐                     │
-│  │ Provider A │                     │
-│  │ (Markets)  │                     │
-│  └────────────┘                     │
-└─────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                    Mobile App                                     │
+│  • Display odds & markets                                        │
+│  • WebSocket for live updates                                    │
+└──────────────┬───────────────────────┬──────────────────────────┘
+               │                         │
+               │ REST API                │ WebSocket
+               │                         │
+    ┌──────────▼──────────┐   ┌─────────▼──────────┐
+    │   Betting API       │   │  Odds & Markets API │
+    │  (Existing)         │   │  (This Service)     │
+    │  • Place bets       │   │  • Surface odds     │
+    │  • User accounts    │   │  • Live updates     │
+    └──────────┬──────────┘   │  • Validate bets    │
+               │               │  • Grade bets      │
+               │               └─────────┬──────────┘
+               │                         │
+               │  Validate/Grade         │
+               └──────────┬──────────────┘
+                          │
+        ┌─────────────────┴─────────────────┐
+        │                                     │
+┌───────▼────────┐                  ┌───────▼────────┐
+│  Polling        │                  │  Data          │
+│  Manager        │                  │  Aggregator    │
+│  • Hierarchical │                  │  • Merge data  │
+│    intervals    │                  │  • Confidence  │
+│  • Health check │                  │  • Best odds   │
+└───────┬────────┘                  └───────┬────────┘
+        │                                     │
+        │  ┌──────────────────────────────────┘
+        │  │
+┌───────▼──▼──────────────────────────────────────┐
+│         Data Providers                          │
+│  ┌────────────┐  ┌────────────┐  ┌──────────┐ │
+│  │ Provider A │  │ Provider B │  │ Provider │ │
+│  │ • Scores   │  │ • Scores   │  │ C        │ │
+│  │ • Markets  │  │            │  │ • Markets│ │
+│  │ • Settlement│ │            │  │ • Settlement│
+│  └────────────┘  └────────────┘  └──────────┘ │
+└─────────────────────────────────────────────────┘
 ```
 
 ## Key Components
@@ -38,9 +58,10 @@ This document explains how the multi-provider system works with configurable pol
 
 All providers implement a common interface:
 
-- `LiveScoreProvider` - Fetches live scores
-- `MarketProvider` - Fetches betting markets
-- `BaseProvider` - Common functionality (health checks, request handling)
+- `LiveScoreProvider` - Fetches live scores and match status
+- `MarketProvider` - Fetches betting markets with odds
+- `SettlementProvider` - Fetches settlement data for grading bets (optional, can be part of MarketProvider)
+- `BaseProvider` - Common functionality (health checks, request handling, error tracking)
 
 ### 2. Polling Manager
 
@@ -54,10 +75,11 @@ Manages configurable polling intervals with hierarchy:
 ### 3. Data Aggregator
 
 Merges data from multiple providers:
-- Matches scores/markets from different providers
-- Calculates confidence scores
-- Handles conflicts (uses most recent data)
-- Tracks best odds across providers
+- **Live Scores**: Matches scores from different providers by team names and timestamps
+- **Markets & Odds**: Matches markets by event ID, market type, and selection; tracks best odds across providers
+- **Settlement Data**: Aggregates settlement data from multiple providers for bet grading
+- **Confidence Scores**: Calculates confidence based on provider agreement
+- **Conflict Resolution**: Uses most recent data, provider priority, and consensus when available
 
 ## Configuration
 
@@ -200,6 +222,75 @@ Markets are matched by:
 
 Best odds tracked across all providers.
 
+### Settlement Data
+
+Settlement data is matched by:
+- Event ID
+- Market ID
+- Provider-specific settlement identifiers
+
+Confidence calculated based on:
+- Agreement between providers on outcome
+- Provider reliability scores
+- Timestamp of settlement data
+
+## Bet Validation Flow
+
+When the betting API needs to validate a bet attempt:
+
+```
+1. Betting API receives bet request from mobile app
+   ↓
+2. Betting API calls POST /api/bets/validate
+   {
+     marketId: "market-123",
+     selection: "home_team",
+     odds: 2.5,
+     stake: 100
+   }
+   ↓
+3. Odds API checks:
+   - Market exists and is active
+   - Market is not suspended
+   - Selection is valid
+   - Current odds match (within tolerance)
+   - Market hasn't been settled
+   ↓
+4. Returns validation result:
+   {
+     valid: true/false,
+     currentOdds: 2.5,
+     marketSuspended: false,
+     reason: "odds_mismatch" (if invalid)
+   }
+   ↓
+5. Betting API processes bet if valid
+```
+
+## Bet Grading Flow
+
+After an event completes, the betting API grades bets:
+
+```
+1. Event completes
+   ↓
+2. Providers publish settlement data
+   ↓
+3. Polling manager aggregates settlement from all providers
+   ↓
+4. Betting API calls GET /api/markets/:marketId/settlement
+   ↓
+5. Odds API returns aggregated settlement:
+   {
+     settlementStatus: "won" | "lost" | "void" | "push",
+     settlementData: { ... },
+     providerSettlements: [ ... ],
+     confidence: 0.95
+   }
+   ↓
+6. Betting API grades bet based on settlement data
+```
+
 ## Example: Multiple Providers for Same Data
 
 ```typescript
@@ -252,6 +343,18 @@ pollingManager.registerMarketPolling(
 3. **Caching**: Aggregated data cached in Redis and memory
 4. **Configurable Intervals**: Adjust based on provider rate limits
 
+## Live Updates (WebSocket)
+
+The system publishes real-time updates via Redis pub/sub for:
+
+- **Score Updates**: Live score changes during matches
+- **Odds Changes**: When odds change for a market
+- **Market Suspensions**: When markets are suspended (injury, weather, etc.)
+- **Market Resumptions**: When suspended markets resume
+- **Settlement Notifications**: When settlement data becomes available
+
+Clients subscribe via WebSocket to receive these updates in real-time.
+
 ## Future Enhancements
 
 - **Database-backed config**: Store polling config in database for runtime updates
@@ -259,4 +362,7 @@ pollingManager.registerMarketPolling(
 - **Rate limit tracking**: Track and respect provider rate limits
 - **Webhook support**: Some providers may support webhooks instead of polling
 - **More granular config**: Match-level, team-level, or event-level intervals
+- **Settlement provider priority**: Weight settlement data by provider reliability
+- **Odds change detection**: Detect and publish only significant odds movements
+- **Market suspension prediction**: Predict likely suspensions based on game state
 

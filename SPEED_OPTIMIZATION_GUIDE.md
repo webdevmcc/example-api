@@ -1,4 +1,6 @@
-# Node.js Speed Optimization Guide for Sports Betting API
+# Speed Optimization Guide for Sports Betting Odds & Markets API
+
+This guide covers performance optimizations for a high-performance odds and markets data API that aggregates data from multiple sports data providers and provides real-time updates for odds changes, market suspensions, and settlement data.
 
 ## 🚀 Priority Recommendations (Biggest Impact First)
 
@@ -69,9 +71,9 @@ const fastify = Fastify({
 await fastify.register(websocket);
 await fastify.register(redis, { url: 'redis://localhost:6379' });
 
-// Live scores endpoint with WebSocket
+// Live updates endpoint with WebSocket (scores, odds changes, suspensions)
 fastify.register(async function (fastify) {
-  fastify.get('/live-scores/:matchId', { websocket: true }, (connection, req) => {
+  fastify.get('/live/:matchId', { websocket: true }, (connection, req) => {
     const matchId = req.params.matchId;
     
     // Subscribe to Redis pub/sub for live updates
@@ -81,6 +83,7 @@ fastify.register(async function (fastify) {
     });
 
     subscriber.on('message', (channel, message) => {
+      // Send score updates, odds changes, suspensions
       connection.socket.send(message);
     });
 
@@ -91,24 +94,37 @@ fastify.register(async function (fastify) {
   });
 });
 
-// REST endpoint with caching
-fastify.get('/markets/:sport', async (request, reply) => {
+// Markets endpoint with caching (30s for markets)
+fastify.get('/api/markets/:sport', async (request, reply) => {
   const { sport } = request.params;
   const cacheKey = `markets:${sport}`;
   
   // Check Redis cache
   const cached = await fastify.redis.get(cacheKey);
   if (cached) {
+    reply.header('X-Cache', 'HIT');
     return JSON.parse(cached);
   }
   
-  // Fetch from database
-  const markets = await fetchMarkets(sport);
+  // Fetch aggregated markets from providers
+  const markets = await aggregator.getMarkets(sport);
   
   // Cache for 30 seconds
   await fastify.redis.setex(cacheKey, 30, JSON.stringify(markets));
+  reply.header('X-Cache', 'MISS');
   
   return markets;
+});
+
+// Bet validation endpoint (no cache, always check current state)
+fastify.post('/api/bets/validate', async (request, reply) => {
+  const { marketId, selection, odds } = request.body;
+  
+  // Get current market state (from cache or providers)
+  const market = await getMarketState(marketId);
+  
+  // Validate bet attempt
+  return validateBet(market, selection, odds);
 });
 
 await fastify.listen({ port: 3000, host: '0.0.0.0' });
@@ -189,14 +205,17 @@ const pool = new Pool({
 
 ### 3. **Redis Caching Strategy**
 ```typescript
-// Cache live scores for 1 second
+// Cache live scores for 1 second (changes frequently)
 await redis.setex(`score:${matchId}`, 1, JSON.stringify(score));
 
-// Cache markets for 30 seconds
+// Cache markets for 30 seconds (odds change less frequently)
 await redis.setex(`markets:${sport}`, 30, JSON.stringify(markets));
 
-// Cache user data for 5 minutes
-await redis.setex(`user:${userId}`, 300, JSON.stringify(user));
+// Cache market state for validation (5 seconds - needs to be current)
+await redis.setex(`market:${marketId}:state`, 5, JSON.stringify(marketState));
+
+// Cache settlement data for 1 hour (rarely changes after event completes)
+await redis.setex(`settlement:${marketId}`, 3600, JSON.stringify(settlement));
 ```
 
 ### 4. **Streaming Responses** (for large datasets)
@@ -225,39 +244,57 @@ fastify.get('/match/:matchId', { schema }, async (request, reply) => {
 
 ---
 
-## 🏗️ Architecture for Sports Betting API
+## 🏗️ Architecture for Sports Betting Odds & Markets API
+
+### System Architecture:
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Mobile App                                │
+│  • Display odds & markets                                    │
+│  • WebSocket for live updates                                │
+└──────────────┬───────────────────────┬──────────────────────┘
+               │                         │
+               │ REST API                │ WebSocket
+               │                         │
+    ┌──────────▼──────────┐   ┌─────────▼──────────┐
+    │   Betting API       │   │  Odds & Markets API │
+    │  (Existing)         │   │  (This Service)     │
+    │  • Place bets       │   │  • Bun + Fastify    │
+    │  • User accounts    │   │  • Multi-provider   │
+    └──────────┬──────────┘   │  • Real-time updates│
+               │               └─────────┬──────────┘
+               │                         │
+               │  Validate/Grade         │
+               └──────────┬──────────────┘
+                          │
+        ┌─────────────────┴─────────────────┐
+        │                                     │
+┌───────▼────────┐                  ┌───────▼────────┐
+│  Polling        │                  │  Data          │
+│  Manager        │                  │  Aggregator    │
+└───────┬────────┘                  └───────┬────────┘
+        │                                     │
+        │  ┌──────────────────────────────────┘
+        │  │
+┌───────▼──▼──────────────────────────────────────┐
+│         Data Providers                          │
+│  (Multiple sports data providers)               │
+└─────────────────────────────────────────────────┘
+                          │
+    ┌─────────────────────┴─────────────────────┐
+    │                                             │
+┌───▼───┐            ┌──────▼──────┐   ┌─────────▼──────┐
+│ Redis │            │ PostgreSQL  │   │ Redis Pub/Sub  │
+│ Cache │            │   (Main DB) │   │ (Live Updates) │
+└───────┘            └─────────────┘   └────────────────┘
+```
 
 ### Recommended Stack:
-```
-┌─────────────────┐
-│   Load Balancer │
-└────────┬────────┘
-         │
-    ┌────┴────┐
-    │  Bun +  │  ← Fastify/Hono API
-    │ Fastify │
-    └────┬────┘
-         │
-    ┌────┴─────────────────┐
-    │                       │
-┌───▼───┐            ┌──────▼──────┐
-│ Redis │            │ PostgreSQL  │
-│ Cache │            │   (Main DB) │
-└───┬───┘            └─────────────┘
-    │
-┌───▼──────────┐
-│ Redis Pub/Sub│  ← For live score updates
-└──────────────┘
-```
-
-### Microservices Structure:
-```
-sports-api/
-├── markets-service/     (Bun + Fastify)
-├── scores-service/      (Bun + Fastify + WebSocket)
-├── odds-service/        (Bun + Fastify)
-└── user-service/        (Bun + Fastify)
-```
+- **Runtime**: Bun (3-4x faster than Node.js)
+- **Framework**: Fastify (2-3x faster than Express/NestJS)
+- **Database**: PostgreSQL with connection pooling
+- **Cache**: Redis (multi-layer: cache + pub/sub)
+- **Real-time**: WebSocket via Redis pub/sub
 
 ---
 
@@ -291,10 +328,17 @@ sports-api/
 2. **Use native async/await** - Don't wrap in RxJS Observables
 3. **Minimize middleware** - Each middleware adds latency
 4. **Use JSON schema validation** - Faster than class-validator
-5. **Cache aggressively** - Live data changes frequently, cache smartly
-6. **Use WebSockets** - Don't poll for live scores
-7. **Connection pooling** - Reuse DB connections
-8. **Stream large responses** - Don't load everything into memory
+5. **Cache aggressively with smart TTLs**:
+   - Live scores: 1 second
+   - Markets/odds: 30 seconds
+   - Market state (for validation): 5 seconds
+   - Settlement data: 1 hour
+6. **Use WebSockets** - Don't poll for live updates (odds changes, suspensions, scores)
+7. **Parallel provider fetching** - Query all providers simultaneously
+8. **Connection pooling** - Reuse DB connections
+9. **Skip unhealthy providers** - Don't wait for slow/failed providers
+10. **Publish only changes** - Use Redis pub/sub to notify only when data actually changes
+11. **Stream large responses** - Don't load everything into memory for market lists
 
 ---
 
@@ -386,5 +430,5 @@ bun build src/index.ts --outdir ./dist --target node
 
 ---
 
-**Bottom Line**: For a sports betting API with live data, **Bun + Fastify** gives you the best combination of speed, features, and developer experience.
+**Bottom Line**: For a sports betting odds and markets API that aggregates data from multiple providers and provides real-time updates, **Bun + Fastify** gives you the best combination of speed, features, and developer experience. The multi-provider architecture with parallel fetching and smart caching ensures high performance even with multiple data sources.
 

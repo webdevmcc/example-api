@@ -2,42 +2,61 @@
 
 ## Overview
 
-This implementation provides a complete multi-provider architecture for sports betting APIs with:
+This implementation provides a complete multi-provider architecture for a sports betting odds and markets API that integrates with an existing betting API. The system provides:
 
-✅ **Multiple data providers** for live scores and markets  
+✅ **Multiple data providers** for live scores, markets, and settlement data  
 ✅ **Configurable polling intervals** by sport, league, and match  
-✅ **Data aggregation** from multiple sources  
+✅ **Data aggregation** from multiple sources with confidence scoring  
 ✅ **Provider health monitoring** and automatic failover  
-✅ **Real-time updates** via WebSocket  
+✅ **Real-time updates** via WebSocket (odds changes, suspensions, scores)  
+✅ **Bet validation** against current market state  
+✅ **Bet grading** with aggregated settlement data  
 ✅ **High performance** using Bun + Fastify  
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      API Server                              │
-│                   (Bun + Fastify)                            │
-│                                                               │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
-│  │ REST API     │  │ WebSocket    │  │ Polling      │      │
-│  │ Endpoints    │  │ Live Updates │  │ Manager      │      │
-│  └──────────────┘  └──────────────┘  └──────┬───────┘      │
-│                                               │              │
-│  ┌───────────────────────────────────────────▼──────────┐  │
-│  │              Data Aggregator                          │  │
-│  │  • Merges data from multiple providers               │  │
-│  │  • Calculates confidence scores                      │  │
-│  │  • Handles conflicts                                 │  │
-│  └──────────────────────────────────────────────────────┘  │
-└───────────────────────────────┬───────────────────────────────┘
-                                │
-        ┌───────────────────────┼───────────────────────┐
-        │                       │                       │
-┌───────▼────────┐    ┌─────────▼────────┐   ┌─────────▼────────┐
-│ Provider A     │    │ Provider B        │   │ Provider C       │
-│ • Live Scores  │    │ • Live Scores     │   │ • Markets       │
-│ • Markets      │    │                   │   │                 │
-└────────────────┘    └──────────────────┘   └─────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                    Mobile App                                     │
+│  • Display odds & markets                                        │
+│  • WebSocket for live updates                                    │
+└──────────────┬───────────────────────┬──────────────────────────┘
+               │                         │
+               │ REST API                │ WebSocket
+               │                         │
+    ┌──────────▼──────────┐   ┌─────────▼──────────┐
+    │   Betting API       │   │  Odds & Markets API │
+    │  (Existing)         │   │  (This Service)     │
+    │  • Place bets       │   │  • Surface odds     │
+    │  • User accounts    │   │  • Live updates     │
+    └──────────┬──────────┘   │  • Validate bets    │
+               │               │  • Grade bets      │
+               │               └─────────┬──────────┘
+               │                         │
+               │  Validate/Grade         │
+               └──────────┬──────────────┘
+                          │
+        ┌─────────────────┴─────────────────┐
+        │                                     │
+┌───────▼────────┐                  ┌───────▼────────┐
+│  Polling        │                  │  Data          │
+│  Manager        │                  │  Aggregator    │
+│  • Hierarchical │                  │  • Merge data  │
+│    intervals    │                  │  • Confidence  │
+│  • Health check │                  │  • Best odds  │
+└───────┬────────┘                  └───────┬────────┘
+        │                                     │
+        │  ┌──────────────────────────────────┘
+        │  │
+┌───────▼──▼──────────────────────────────────────┐
+│         Data Providers                          │
+│  ┌────────────┐  ┌────────────┐  ┌──────────┐ │
+│  │ Provider A │  │ Provider B │  │ Provider │ │
+│  │ • Scores   │  │ • Scores   │  │ C        │ │
+│  │ • Markets  │  │            │  │ • Markets│ │
+│  │ • Settlement│ │            │  │ • Settlement│
+│  └────────────┘  └────────────┘  └──────────┘ │
+└─────────────────────────────────────────────────┘
 ```
 
 ## Key Features
@@ -82,8 +101,22 @@ Polling intervals configured at multiple levels:
 
 - **Live Scores**: Matched by team names and timestamps
 - **Markets**: Matched by event, market type, and selection
+- **Settlement Data**: Aggregated from multiple providers for bet grading
 - **Confidence Scores**: Calculated based on agreement between providers
 - **Best Odds**: Tracked across all providers for markets
+
+### 4. Bet Validation
+
+- Validates bet attempts against current market state
+- Checks odds match (within tolerance)
+- Verifies market is active and not suspended
+- Ensures selection is valid
+
+### 5. Bet Grading
+
+- Aggregates settlement data from multiple providers
+- Provides confidence scores for settlement outcomes
+- Handles conflicts between provider settlements
 
 ### 4. Provider Health
 
@@ -245,18 +278,41 @@ GET /api/polling/status
 # Get live score for a match
 GET /api/scores/:matchId
 
-# WebSocket for real-time updates
+# WebSocket for real-time updates (scores, odds changes, suspensions)
 WS /live/:matchId
+
+# WebSocket for market updates by sport
+WS /markets/:sport
 ```
 
-### Markets
+### Markets & Odds
 
 ```bash
 # Get markets by sport
 GET /api/markets/:sport?league=nfl
 
+# Get current odds for a market
+GET /api/markets/:marketId/odds
+
 # Example: Get NFL markets
 GET /api/markets/football?league=nfl
+```
+
+### Bet Validation & Grading
+
+```bash
+# Validate a bet attempt
+POST /api/bets/validate
+{
+  "marketId": "market-123",
+  "selection": "home_team",
+  "odds": 2.5,
+  "stake": 100
+}
+
+# Get settlement data for grading
+GET /api/bets/:betId/settlement
+GET /api/markets/:marketId/settlement
 ```
 
 ### Polling Management
@@ -469,12 +525,27 @@ Response:
 
 5. **Use WebSockets** for real-time updates instead of polling clients
 
+## Integration with Betting API
+
+This service integrates with your existing betting API:
+
+1. **Odds Display**: Mobile app calls this API to display current odds
+2. **Live Updates**: Mobile app subscribes to WebSocket for real-time updates
+3. **Bet Validation**: Betting API calls `/api/bets/validate` before accepting bets
+4. **Bet Grading**: Betting API calls `/api/markets/:marketId/settlement` after events complete
+
+See the main README for detailed integration flow diagrams.
+
 ## Next Steps
 
 - [ ] Add your actual provider implementations
 - [ ] Configure polling intervals for your sports/leagues
-- [ ] Set up database schema for persistent storage
-- [ ] Add authentication/authorization
+- [ ] Set up database schema for persistent storage (markets, scores, settlements)
+- [ ] Implement bet validation endpoint with odds tolerance logic
+- [ ] Implement settlement data aggregation for bet grading
+- [ ] Add market suspension detection and propagation
+- [ ] Configure WebSocket authentication if needed
 - [ ] Set up monitoring and alerting
 - [ ] Configure production environment variables
+- [ ] Integrate with your betting API
 
