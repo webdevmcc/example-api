@@ -1,6 +1,26 @@
 # High-Performance Sports Betting API
 
-Example implementation using **Bun + Fastify** for maximum speed.
+Example implementation using **Bun + Fastify** for maximum speed with a **multi-provider architecture** for aggregating live scores and betting markets from multiple data sources.
+
+## What This Code Represents
+
+This is a production-ready sports betting API that demonstrates:
+
+- **Multi-Provider System**: Aggregates data from multiple sports data providers (live scores, betting markets)
+- **Configurable Polling**: Hierarchical polling intervals (match-level, league-level, sport-level, default)
+- **Data Aggregation**: Merges data from multiple providers with confidence scoring
+- **Real-Time Updates**: WebSocket support for live score updates via Redis pub/sub
+- **High Performance**: Built with Bun runtime and Fastify framework for maximum throughput
+- **Provider Health Monitoring**: Automatic failover and health tracking for data providers
+- **Smart Caching**: Multi-layer caching (Redis + in-memory) with different TTLs for different data types
+
+## Documentation
+
+This repository includes comprehensive documentation:
+
+- **[PROVIDER_ARCHITECTURE.md](./PROVIDER_ARCHITECTURE.md)** - Detailed explanation of the multi-provider system architecture, how providers work, polling configuration hierarchy, and data aggregation strategies
+- **[MULTI_PROVIDER_SETUP.md](./MULTI_PROVIDER_SETUP.md)** - Step-by-step setup guide for configuring multiple providers, polling intervals, and adding new providers
+- **[SPEED_OPTIMIZATION_GUIDE.md](./SPEED_OPTIMIZATION_GUIDE.md)** - Performance optimization guide comparing Bun, Fastify, and Hono, with migration strategies from NestJS/Express
 
 ## Features
 
@@ -11,6 +31,34 @@ Example implementation using **Bun + Fastify** for maximum speed.
 - 🚦 **Rate limiting**: Built-in protection
 - 📊 **Connection pooling**: Optimized database connections
 - 🎯 **Type-safe**: Full TypeScript support
+
+## Source Code Structure
+
+The codebase is organized into a modular architecture:
+
+```
+src/
+├── index.ts                 # Main Fastify server, routes, and provider initialization
+├── config/
+│   └── polling-config.ts   # Polling interval configuration (sport/league/match levels)
+├── providers/
+│   ├── base.ts             # Base provider class with common functionality
+│   ├── aggregator.ts       # Data aggregation logic for merging multi-provider data
+│   ├── types.ts            # TypeScript interfaces for providers and data types
+│   └── example-providers.ts # Example provider implementations (ProviderA, ProviderB)
+└── polling/
+    └── polling-manager.ts  # Manages configurable polling tasks with hierarchical intervals
+```
+
+### Key Components
+
+- **Provider System** (`src/providers/`): Abstract base classes and interfaces for implementing data providers. Supports both `LiveScoreProvider` and `MarketProvider` interfaces. Each provider tracks health status, response times, and error rates.
+
+- **Polling Manager** (`src/polling/polling-manager.ts`): Manages background polling tasks with configurable intervals. Supports hierarchical configuration (match → league → sport → default) and dynamic interval updates at runtime.
+
+- **Data Aggregator** (`src/providers/aggregator.ts`): Merges data from multiple providers, calculates confidence scores based on provider agreement, handles conflicts, and tracks best odds across providers.
+
+- **Fastify Server** (`src/index.ts`): REST API endpoints, WebSocket support, Redis integration, JWT authentication, rate limiting, and provider/polling management endpoints.
 
 ## Quick Start
 
@@ -64,14 +112,21 @@ ALLOWED_ORIGINS=http://localhost:3000,http://localhost:3001
 
 ### REST API
 
-- `GET /health` - Health check
-- `GET /api/markets/:sport` - Get betting markets (cached 30s)
-- `GET /api/scores/:matchId` - Get live scores (cached 1s)
-- `GET /api/user/:userId/bets` - Get user bets (requires JWT)
+**Health & Status**
+- `GET /health` - Overall health check with provider and polling status
+- `GET /api/providers/health` - Detailed health status for all providers
+- `GET /api/polling/status` - Status of all polling tasks and configuration
+
+**Data Endpoints**
+- `GET /api/markets/:sport?league=nfl` - Get betting markets (cached 30s, aggregated from multiple providers)
+- `GET /api/scores/:matchId` - Get live scores (cached 1s, aggregated from multiple providers)
+
+**Management**
+- `POST /api/polling/update` - Update polling interval for a specific task (requires `taskId` and `interval`)
 
 ### WebSocket
 
-- `WS /live/:matchId` - Real-time score updates
+- `WS /live/:matchId` - Real-time score updates via Redis pub/sub. Sends `score_update` messages when scores change.
 
 ## Performance Benchmarks
 
